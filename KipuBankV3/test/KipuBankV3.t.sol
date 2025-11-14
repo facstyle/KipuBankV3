@@ -1,177 +1,184 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
-/*
-    Tests base de KipuBankV3
-    ------------------------
-    ✔ Compatible con Foundry
-    ✔ Usa mocks para USDC y UniswapV2Router
-    ✔ Cubre despliegue, depósitos, límites y roles
-    ✔ Extensible para llegar al 50% de coverage
-*/
-
 import "forge-std/Test.sol";
 import "../src/KipuBankV3.sol";
 import "./mocks/MockERC20.sol";
 import "./mocks/MockUniswapV2Router.sol";
 
 contract KipuBankV3Test is Test {
-    // ──────────────────────────────────────────────────────────────
-    // Variables
-    // ──────────────────────────────────────────────────────────────
     address owner;
     address user;
-    address attacker;
+    address otherUser;
 
     MockERC20 usdc;
     MockERC20 tokenA;
     MockUniswapV2Router router;
+    KipuBankV3 kipu;
 
-    KipuBankV3 kipuBank;
+    uint256 constant BANK_CAP = 100_000e6; // 100k USDC (6 dec)
+    address constant WETH_DUMMY = address(0x1111);
 
-    // Bank cap inicial (en USDC, 6 decimales)
-    uint256 constant BANK_CAP = 100_000e6;
-    uint256 constant WITHDRAW_LIMIT = 2_000e6;
-
-    // Mock address for Chainlink feed (solo placeholder)
-    address constant ETH_USD_FEED = address(1111);
-
-
-    // ──────────────────────────────────────────────────────────────
-    // Setup
-    // ──────────────────────────────────────────────────────────────
     function setUp() public {
         owner = address(this);
         user = makeAddr("user");
-        attacker = makeAddr("attacker");
+        otherUser = makeAddr("otherUser");
 
         // Crear tokens mock
         usdc = new MockERC20("USD Coin", "USDC", 6);
         tokenA = new MockERC20("TokenA", "TKA", 18);
 
-        // Crear router mock (simula swaps 1:1)
-        router = new MockUniswapV2Router(address(usdc));
-
-        // Deploy del contrato
-        kipuBank = new KipuBankV3(
-            address(router),
-            ETH_USD_FEED,
-            address(usdc),
-            BANK_CAP,
-            WITHDRAW_LIMIT
-        );
-
-        // Darle USDC al router mock
+        // Crear router mock y darle USDC para simular liquidez
+        router = new MockUniswapV2Router(address(usdc), WETH_DUMMY);
         usdc.mint(address(router), 1_000_000e6);
+
+        // Deploy KipuBankV3
+        kipu = new KipuBankV3(address(router), address(usdc), BANK_CAP);
+
+        // Marcar tokenA como soportado
+        kipu.setSupportedToken(address(tokenA), true);
+
+        // Fondos iniciales para usuarios
+        usdc.mint(user, 10_000e6);
+        tokenA.mint(user, 1_000e18);
     }
 
-    // ──────────────────────────────────────────────────────────────
-    // Tests básicos de despliegue
-    // ──────────────────────────────────────────────────────────────
+    /*//////////////////////////////////////////////////////////////
+                        TESTS DE DESPLIEGUE
+    //////////////////////////////////////////////////////////////*/
+
     function testDeployment() public {
-        assertEq(kipuBank.bankCap(), BANK_CAP, "BankCap incorrecto");
-        assertEq(kipuBank.withdrawalLimit(), WITHDRAW_LIMIT, "WithdrawalLimit incorrecto");
-        assertEq(kipuBank.owner(), owner, "Owner incorrecto");
+        assertEq(kipu.bankCapUSDC(), BANK_CAP, "BankCap incorrecto");
+        assertEq(kipu.getUSDCAddress(), address(usdc), "USDC incorrecto");
+        assertEq(kipu.owner(), owner, "Owner incorrecto");
     }
 
-    // ──────────────────────────────────────────────────────────────
-    // Test depósito de ETH (convertido a USDC en la lógica final)
-    // ──────────────────────────────────────────────────────────────
+    /*//////////////////////////////////////////////////////////////
+                        TEST: DEPÓSITO USDC DIRECTO
+    //////////////////////////////////////////////////////////////*/
+
+    function testDepositUSDC() public {
+        vm.startPrank(user);
+        usdc.approve(address(kipu), 1_000e6);
+        kipu.deposit(address(usdc), 1_000e6);
+        vm.stopPrank();
+
+        uint256 bal = kipu.getBalanceUSDC(user);
+        assertEq(bal, 1_000e6);
+        assertEq(kipu.getTotalUSDC(), 1_000e6);
+    }
+
+    /*//////////////////////////////////////////////////////////////
+                        TEST: DEPÓSITO ERC20 + SWAP
+    //////////////////////////////////////////////////////////////*/
+
+    function testDepositSupportedTokenSwapsToUSDC() public {
+        vm.startPrank(user);
+        tokenA.approve(address(kipu), 500e18);
+        kipu.deposit(address(tokenA), 500e18);
+        vm.stopPrank();
+
+        uint256 bal = kipu.getBalanceUSDC(user);
+        assertGt(bal, 0, "El balance en USDC debe aumentar");
+    }
+
+    function testDepositUnsupportedTokenReverts() public {
+        address unsupported = makeAddr("unsupported");
+        vm.startPrank(user);
+        vm.expectRevert(); // ErrTokenNotSupported
+        kipu.deposit(unsupported, 100e18);
+        vm.stopPrank();
+    }
+
+    /*//////////////////////////////////////////////////////////////
+                        TEST: DEPÓSITO EN ETH
+    //////////////////////////////////////////////////////////////*/
+
     function testDepositETH() public {
-        // User deposita 1 ETH
         vm.deal(user, 1 ether);
 
-        vm.prank(user);
-        kipuBank.depositNative{ value: 1 ether }();
-
-        // Debe haberse acreditado en USDC después del swap
-        uint256 bal = kipuBank.balanceOf(user);
-        assertGt(bal, 0, "El balance debería aumentar");
-    }
-
-    // ──────────────────────────────────────────────────────────────
-    // Test depósito directo de USDC
-    // ──────────────────────────────────────────────────────────────
-    function testDepositUSDC() public {
-        usdc.mint(user, 1000e6);
-
         vm.startPrank(user);
-        usdc.approve(address(kipuBank), 1000e6);
-        kipuBank.depositUSDC(1000e6);
+        kipu.deposit{value: 1 ether}(address(0), 0);
         vm.stopPrank();
 
-        assertEq(kipuBank.balanceOf(user), 1000e6);
+        uint256 bal = kipu.getBalanceUSDC(user);
+        assertGt(bal, 0, "El balance en USDC debe aumentar tras depositar ETH");
     }
 
-    // ──────────────────────────────────────────────────────────────
-    // Test depósito de token arbitrario (TKA)
-    // ──────────────────────────────────────────────────────────────
-    function testDepositTokenAConvertedToUSDC() public {
-        // Registrar token A como soportado
-        vm.prank(owner);
-        kipuBank.addSupportedToken(address(tokenA));
+    /*//////////////////////////////////////////////////////////////
+                        TEST: BANK CAP
+    //////////////////////////////////////////////////////////////*/
 
-        // User recibe token A
-        tokenA.mint(user, 5 ether);
-
-        // User lo aprueba y deposita
-        vm.startPrank(user);
-        tokenA.approve(address(kipuBank), 5 ether);
-        kipuBank.depositToken(address(tokenA), 5 ether);
-        vm.stopPrank();
-
-        // Después del swap debe acreditarse en USDC
-        assertGt(kipuBank.balanceOf(user), 0, "El balance USDC debe aumentar");
-    }
-
-    // ──────────────────────────────────────────────────────────────
-    // Test bankCap
-    // ──────────────────────────────────────────────────────────────
     function testBankCapLimit() public {
-        usdc.mint(user, 200_000e6); // excede cap
+        // subir bankCap a un valor chico para test
+        kipu.setBankCapUSDC(1_000e6);
 
-        vm.startPrank(user);
-        usdc.approve(address(kipuBank), 200_000e6);
-        vm.expectRevert();
-        kipuBank.depositUSDC(200_000e6);
+        usdc.mint(otherUser, 10_000e6);
+
+        vm.startPrank(otherUser);
+        usdc.approve(address(kipu), 10_000e6);
+
+        // primer depósito dentro del límite
+        kipu.deposit(address(usdc), 500e6);
+
+        // segundo depósito excede bankCap
+        vm.expectRevert(); // ErrBankCapExceeded
+        kipu.deposit(address(usdc), 600e6);
         vm.stopPrank();
     }
 
-    // ──────────────────────────────────────────────────────────────
-    // Test retiro
-    // ──────────────────────────────────────────────────────────────
+    /*//////////////////////////////////////////////////////////////
+                        TEST: RETIROS
+    //////////////////////////////////////////////////////////////*/
+
     function testWithdrawUSDC() public {
-        usdc.mint(user, 5000e6);
-
         vm.startPrank(user);
-        usdc.approve(address(kipuBank), 5000e6);
-        kipuBank.depositUSDC(5000e6);
+        usdc.approve(address(kipu), 2_000e6);
+        kipu.deposit(address(usdc), 2_000e6);
 
-        kipuBank.withdrawUSDC(2000e6);
+        // retirar una parte
+        kipu.withdraw(500e6);
+        vm.stopPrank();
 
-        assertEq(kipuBank.balanceOf(user), 3000e6);
+        uint256 bal = kipu.getBalanceUSDC(user);
+        assertEq(bal, 1_500e6);
+    }
+
+    function testWithdrawMoreThanBalanceReverts() public {
+        vm.startPrank(user);
+        usdc.approve(address(kipu), 1_000e6);
+        kipu.deposit(address(usdc), 1_000e6);
+
+        vm.expectRevert(); // ErrInsufficientUserBalance
+        kipu.withdraw(2_000e6);
         vm.stopPrank();
     }
 
-    // ──────────────────────────────────────────────────────────────
-    // Test acceso del owner
-    // ──────────────────────────────────────────────────────────────
-    function testOwnerOnlyFunctions() public {
-        // attacker intenta agregar tokens
-        vm.prank(attacker);
-        vm.expectRevert();
-        kipuBank.addSupportedToken(address(1234));
+    /*//////////////////////////////////////////////////////////////
+                        TEST: OWNER-ONLY
+    //////////////////////////////////////////////////////////////*/
+
+    function testOnlyOwnerCanSetSupportedToken() public {
+        address newToken = makeAddr("newToken");
+        vm.prank(user);
+        vm.expectRevert(); // Ownable: caller is not the owner
+        kipu.setSupportedToken(newToken, true);
     }
 
-    // ──────────────────────────────────────────────────────────────
-    // Test errores
-    // ──────────────────────────────────────────────────────────────
-    function testDepositZeroAmountShouldFail() public {
+    function testOwnerCanSetBankCap() public {
+        kipu.setBankCapUSDC(50_000e6);
+        assertEq(kipu.bankCapUSDC(), 50_000e6);
+    }
+
+    /*//////////////////////////////////////////////////////////////
+                        TEST: ERRORES BÁSICOS
+    //////////////////////////////////////////////////////////////*/
+
+    function testDepositZeroAmountReverts() public {
         vm.startPrank(user);
-        usdc.mint(user, 100e6);
-        usdc.approve(address(kipuBank), 100e6);
-        vm.expectRevert();
-        kipuBank.depositUSDC(0);
+        usdc.approve(address(kipu), 1_000e6);
+        vm.expectRevert(); // ErrZeroAmount
+        kipu.deposit(address(usdc), 0);
         vm.stopPrank();
     }
 }
