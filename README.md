@@ -1,268 +1,183 @@
-📘 README.md – KipuBankV3
-🏦 KipuBankV3 – Banco DeFi con Swaps Automáticos a USDC
+🏦 KipuBankV3 - Banco DeFi con Swaps Automáticos a USDC
 
-Autor: Felipe A. Cristaldo
-Versión: 3.0
-Framework: Foundry
-Red objetivo: Sepolia (o testnet compatible con Uniswap V2)
+**Autor:** Felipe A. Cristaldo  
+**Versión:** 3.0  
+**Framework:** Foundry  
+**Red objetivo:** Sepolia (o testnet compatible con Uniswap V2)
 
-📌 Resumen Ejecutivo
+---
 
-KipuBankV3 es la evolución del sistema KipuBank desarrollado a lo largo del curso.
-Como mejora principal, esta versión incorpora integración nativa con Uniswap V2, permitiendo que los usuarios depositen ETH, USDC o cualquier ERC-20 compatible con el router, que automáticamente será convertido a USDC, lo que simplifica enormemente la contabilidad interna y aumenta la seguridad del protocolo.
+## 📌 Resumen Ejecutivo
 
-El contrato trabaja exclusivamente con saldo interno expresado en USDC, asegurando consistencia contable y permitiendo aplicar un bankCap centralizado en una única unidad de valor.
+KipuBankV3 es la evolución del sistema KipuBank desarrollado a lo largo del curso.  
+Esta versión integra Uniswap V2 para permitir que los usuarios depositen **ETH, USDC o cualquier ERC-20 compatible con el router**, que automáticamente será convertido a **USDC**, simplificando la contabilidad interna y el control de riesgo.
 
-A la vez, se conserva toda la lógica fundamental de KipuBankV2:
+El contrato trabaja exclusivamente con saldo interno expresado en USDC, manteniendo:
 
-Control del propietario (owner)
+- Control del propietario (`owner`)
+- Depósitos y retiros
+- Límite global (`bankCapUSDC`)
+- Contadores de operaciones
+- Manejo explícito de errores personalizados y protección contra reentrancia
 
-Depósitos y retiros
+---
 
-Protección contra reentrancias
+## 1️⃣ Objetivos del Proyecto
 
-Contadores de operaciones
+- Manejar cualquier token ERC-20 swappeable a USDC vía UniswapV2.  
+- Ejecutar swaps dentro del smart contract al momento del depósito.  
+- Preservar la funcionalidad de KipuBankV2 (owner, depósitos, retiros, bank cap).  
+- Respetar el **bankCap**: ningún depósito puede exceder la capacidad máxima del banco.  
+- Alcanzar un nivel de testeo suficiente usando Foundry.
 
-Manejo explícito de errores personalizados
+---
 
-1️⃣ Objetivos del Proyecto
+## 2️⃣ Arquitectura del Contrato
 
-KipuBankV3 cumple los siguientes puntos requeridos por la consigna:
+Componentes principales:
 
-✔ 1. Manejo de cualquier token ERC-20 swappeable a USDC
+- `usdc`: token de referencia y unidad única de contabilidad interna.
+- `uniswapRouter`: router de UniswapV2 utilizado para los swaps.
+- `weth`: token WETH del router.
+- `bankCapUSDC`: límite máximo de USDC bajo custodia.
+- `totalUSDC`: suma de todos los balances de usuarios.
+- `_balancesUSDC[user]`: balance interno por usuario en USDC.
+- `isSupportedToken[token]`: mapa de tokens habilitados para depósito (además de ETH y USDC).
+- Contadores `depositCount` y `withdrawalCount`.
 
-Cualquier token que tenga par directo con USDC en Uniswap V2 puede depositarse.
+---
 
-✔ 2. Ejecución automática de swaps
+## 3️⃣ Flujo de Depósitos
 
-Los depósitos en:
+El usuario llama a:
 
-ETH
+```solidity
+function deposit(address tokenIn, uint256 amount) external payable;
+Casos:
 
-Otros ERC-20
+tokenIn == address(0) → depósito en ETH
 
-Son convertidos automáticamente en USDC mediante UniswapV2 Router02.
+El contrato ejecuta _swapETHForUSDC vía UniswapV2.
 
-✔ 3. Consistencia contable internamente en USDC
+tokenIn == address(usdc) → depósito directo en USDC
 
-Esto permite:
+Se transfiere USDC con _takeUSDCFromUser.
 
-Un único mapa de balances
+Otro ERC20:
 
-Facilidad de auditoría
+Debe estar habilitado en isSupportedToken[tokenIn].
 
-Límites (bankCap y retiros) expresados en una sola unidad
+Se ejecuta _swapERC20ForUSDC vía UniswapV2.
 
-✔ 4. Respeto por el bankCap
+En todos los casos, el resultado final es un monto en USDC (usdcReceived) que se acredita al balance interno del usuario, siempre verificando antes que:
 
-Ningún depósito incrementará el total del banco por encima del límite.
-
-✔ 5. Preservación de funcionalidades de KipuBankV2
-
-owner
-
-Depósitos / retiros
-
-Balance por usuario
-
-Protección de seguridad
-
-✔ 6. Pruebas en Foundry
-
-El proyecto está diseñado para alcanzar fácilmente +50% de cobertura mediante tests unitarios.
-
-2️⃣ Arquitectura del Contrato
-🏗 Componentes principales
-
-El contrato incluye:
-
-USDC como token contable interno
-IERC20 public immutable usdc;
-
-Router Uniswap V2
-Para ejecutar swaps desde varios tokens hacia USDC.
-
-Token WETH del router
-Para routeo de ETH→USDC.
-
-BankCap
-Límite máximo permitido de USDC bajo custodia.
-
-Balances internos
-Mapeo:
-mapping(address => uint256) private _balancesUSDC;
-
-Tokens ERC20 habilitados (allowlist)
-Mapa para tokens con pool USDC:
-mapping(address => bool) public isSupportedToken;
-
-Contadores de operaciones
-
-depositCount
-
-withdrawalCount
-
-3️⃣ Flujo de Depósitos
-
-Los usuarios pueden depositar:
-
-💠 ETH
-
-→ Se pasa por Uniswap V2 → Se convierte a USDC → Se acredita al usuario.
-
-💠 USDC
-
-→ Se acredita directamente.
-
-💠 Otros ERC-20
-
-→ Verifica si está soportado
-→ Hace swap TOKEN → USDC
-→ Se acredita al usuario.
-
+solidity
+Copiar código
+totalUSDC + usdcReceived <= bankCapUSDC
 4️⃣ Flujo de Retiros
+Los retiros se realizan exclusivamente en USDC mediante:
 
-Los retiros se realizan exclusivamente en USDC.
-El contrato verifica:
+solidity
+Copiar código
+function withdraw(uint256 amountUSDC) external;
+Pasos:
 
-Que el usuario tenga fondos suficientes
+Verifica que el usuario tenga saldo suficiente.
 
-Que el contrato posea liquidez suficiente
+Verifica que el contrato tenga liquidez suficiente en USDC.
 
-Que no se trate de reentradas
+Actualiza los balances internos y totalUSDC.
 
-5️⃣ Seguridad Implementada
-🔒 ReentrancyGuard
+Transfiere USDC al usuario utilizando SafeERC20.
 
-Previene ataques por reentrancia en depósitos y retiros.
+5️⃣ Seguridad
+ReentrancyGuard en funciones críticas (deposit, withdraw).
 
-🔒 SafeERC20
+SafeERC20 para todas las transferencias de tokens.
 
-Garantiza transferencias seguras, evitando errores silenciosos.
+Control de acceso mediante Ownable (solo el owner puede cambiar bankCapUSDC y soportar nuevos tokens).
 
-🔒 owner
+Lista blanca de tokens (setSupportedToken) para evitar depósitos de tokens sin liquidez o maliciosos.
 
-Las funciones administrativas se restringen al dueño del contrato.
-
-🔒 Permit List (lista blanca de tokens)
-
-Sólo tokens específicos pueden usarse para depósitos (evita ataques con tokens maliciosos).
-
-🔒 amountOutMin=0 solo para entorno académico
-
-En producción debe reemplazarse por slippage seguro.
+amountOutMin = 0 se mantiene solo en el contexto académico; en producción debe reemplazarse por un cálculo de slippage seguro.
 
 6️⃣ Instrucciones de Despliegue (Foundry)
-1. Instalar dependencias
+Instalar dependencias (en el root del proyecto):
+
+bash
+Copiar código
 forge install OpenZeppelin/openzeppelin-contracts
+Configurar variables de entorno (.env):
 
-2. Crear archivo de despliegue
+env
+Copiar código
+PRIVATE_KEY=0xTU_LLAVE_PRIVADA
+UNISWAP_ROUTER=0x...    # Router UniswapV2 de la testnet
+USDC_ADDRESS=0x...      # USDC en la red elegida
+BANK_CAP_USDC=100000000000  # según decimales de USDC
+Ejecutar el script de despliegue:
 
-/script/DeployKipuBankV3.s.sol
+bash
+Copiar código
+forge script script/DeployKipuBankV3.s.sol --rpc-url $RPC_URL --broadcast
+Guardar la dirección del contrato desplegado y verificarlo en un explorador (Etherscan, Routescan o Blockscout).
 
-3. Ejecutar deploy
-forge script script/DeployKipuBankV3.s.sol --rpc-url $RPC --broadcast --verify
+7️⃣ Pruebas y Cobertura
+Las pruebas están en test/KipuBankV3.t.sol e incluyen:
 
-7️⃣ Interacción Básica
-💰 Depositar ETH
-kipuBankV3.deposit{value: 1 ether}(address(0), 0);
+Depósito de USDC.
 
-💰 Depositar ERC-20 estándar
-token.approve(address(kipuBankV3), amount);
-kipuBankV3.deposit(address(token), amount);
+Depósito de ERC20 soportado con swap simulado a USDC.
 
-💸 Retirar USDC
-kipuBankV3.withdraw(500e6); // 500 USDC
+Depósito de ETH.
 
-8️⃣ Análisis de Amenazas (Threat Model)
+Respeto del bankCapUSDC.
 
-Este módulo identifica riesgos reales del protocolo y sus mitigaciones.
+Retiros válidos e intentos de retiro por encima del balance.
 
-🟥 Riesgos Identificados
-1. Slippage en swaps
+Restricción de funciones onlyOwner.
 
-➡ Solución académica: amountOutMin = 0
-➡ Producción: debe agregarse slippage controlado.
-
-2. Liquidez insuficiente en el pool
-
-➡ El contrato valida el USDC recibido antes de acreditar.
-➡ No se actualizan balances si el swap falla.
-
-3. Reentrancy
-
-➡ Uso de ReentrancyGuard.
-
-4. Tokens maliciosos
-
-➡ Se implementa allowlist isSupportedToken.
-
-5. Aprobaciones infinitas (no seguras)
-
-➡ Se usa approve(0) antes de approve(amount).
-
-6. Oráculo externo NO utilizado
-
-➡ El contrato no depende de oráculos, evitando riesgos de manipulación.
-
-🟩 Madurez y pasos faltantes
-
-Para una versión "production-ready" del protocolo:
-
-Slippage seguro
-
-TWAP oracles para protección contra MEV
-
-Límite por usuario
-
-Sistema de pausas (pausable)
-
-Tests de fuzzing y property-based testing
-
-Cobertura de 90%+
-
-9️⃣ Pruebas y Cobertura
-
-Para alcanzar el 50% mínimo requerido se incluyen tests de:
-
-✔ Depósito ETH
-✔ Depósito USDC
-✔ Depósito de ERC-20 con swap
-✔ Retiro válido
-✔ Retiro que falla por falta de balance
-✔ Superación del bankCap
-✔ Token no soportado
-✔ Owner-only functions
-✔ Conteo de depósitos y retiros
+Errores básicos (monto cero, token no soportado, etc.).
 
 Ejecutar:
 
-forge test --coverage
+bash
+Copiar código
+forge test
+Para ver cobertura:
 
-🔟 Decisiones de Diseño (Trade-offs)
+bash
+Copiar código
+forge coverage
+8️⃣ Análisis de Amenazas (Threat Model)
+Riesgos identificados:
 
-USDC como única unidad de contabilidad
+Slippage en swaps: en producción debe implementarse amountOutMin con tolerancia razonable y/o TWAPs.
 
-Simplifica auditoría
+Liquidez insuficiente: el contrato se basa en la liquidez del pool de UniswapV2; el diseño asume pools líquidos para los tokens soportados.
 
-Permite bankCap robusto
+Reentrancy: mitigado con ReentrancyGuard.
 
-Evita inconsistencias por decimales distintos
+Tokens maliciosos: mitigado con allowlist de tokens (setSupportedToken).
 
-Sin soporte a swaps USDC → otros tokens
+Aprobaciones de tokens: el contrato resetea aprobaciones después de usarlas para reducir superficie de ataque.
 
-Mantiene el protocolo simple
+Pasos faltantes hacia madurez de producción:
 
-Reduce superficie de ataque
+Límite de exposición por token y por usuario.
 
-Sin oráculos externos
+Sistema de pausas de emergencia (Pausable).
 
-Evita riesgos de manipulación
+Integrar oráculos o TWAP para precios más robustos.
 
-UniswapV2 provee el precio de mercado
+Testing avanzado: fuzzing y property-based testing, cobertura > 90%.
 
-amountOutMin=0 solo para entorno académico
+9️⃣ Decisiones de Diseño
+Uso de USDC como única unidad de contabilidad → simplifica auditoría y control de riesgo.
 
-Máxima compatibilidad
+No se implementa swap de salida (USDC → otros tokens) para reducir complejidad y superficie de ataque.
 
-Debe revisarse para producción
+La integración con UniswapV2 se limita al flujo necesario para el examen (depósitos → swap → USDC).
+
+Se prioriza claridad de código y seguridad sobre optimizaciones agresivas de gas.
+
