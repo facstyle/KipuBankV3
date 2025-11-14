@@ -29,9 +29,9 @@ interface IUniswapV2Router02 {
 /// @title KipuBankV3 - Banco DeFi con integración UniswapV2 y contabilidad en USDC.
 /// @author Felipe
 /// @notice Permite depositar ETH o cualquier ERC20 con par a USDC en Uniswap V2,
-///         swappear internamente a USDC y llevar la contabilidad en ese token.
+///         swappear internamente a USDC y llevar la contabilidad solo en USDC.
 /// @dev Preserva la lógica principal de KipuBankV2 (owner, depósitos, retiros y bankCap),
-///      agregando integración con Uniswap V2. Diseñado para ser usado y testeado con Foundry.
+///      agregando integración con Uniswap V2. Diseñado para ser testeado con Foundry.
 contract KipuBankV3 is Ownable, ReentrancyGuard {
     using SafeERC20 for IERC20;
 
@@ -57,7 +57,7 @@ contract KipuBankV3 is Ownable, ReentrancyGuard {
     event Withdrawal(address indexed user, uint256 amountUSDC);
 
     /// @notice Emite un evento cuando se actualiza el bankCap.
-    /// @param newBankCapUSDC Nuevo límite máximo del banco expresado en USDC (decimales de USDC).
+    /// @param newBankCapUSDC Nuevo límite máximo del banco expresado en USDC.
     event BankCapUpdated(uint256 newBankCapUSDC);
 
     /// @notice Emite un evento cuando se habilita o deshabilita un token ERC20 para depósito.
@@ -74,6 +74,9 @@ contract KipuBankV3 is Ownable, ReentrancyGuard {
 
     /// @notice Se lanza cuando se envía ETH pero no se esperaba, o viceversa.
     error ErrInvalidETHValue();
+
+    /// @notice Se lanza cuando se usa una dirección inválida (address(0)).
+    error ErrInvalidAddress();
 
     /// @notice Se lanza cuando un token no está soportado para depósito.
     error ErrTokenNotSupported(address token);
@@ -101,7 +104,7 @@ contract KipuBankV3 is Ownable, ReentrancyGuard {
     address public immutable weth;
 
     /// @notice Límite máximo de USDC que el banco puede custodiar en total (suma de todos los balances de usuarios).
-    /// @dev Expresado en unidades de USDC (ej: si USDC tiene 6 decimales, bankCap está en esos mismos decimales).
+    /// @dev Expresado en unidades de USDC (ej: si USDC tiene 6 decimales, bankCapUSDC también).
     uint256 public bankCapUSDC;
 
     /// @notice Suma de todos los balances de usuarios en USDC.
@@ -124,25 +127,25 @@ contract KipuBankV3 is Ownable, ReentrancyGuard {
                                 CONSTRUCTOR
     //////////////////////////////////////////////////////////////*/
 
-    /// @param _usdc Dirección del contrato USDC en la red correspondiente.
     /// @param _uniswapRouter Dirección del router de Uniswap V2.
+    /// @param _usdc Dirección del contrato USDC en la red correspondiente.
     /// @param _bankCapUSDC Límite total inicial del banco expresado en USDC.
     constructor(
-        address _usdc,
         address _uniswapRouter,
+        address _usdc,
         uint256 _bankCapUSDC
     ) {
-        if (_usdc == address(0) || _uniswapRouter == address(0)) {
-            revert ErrInvalidETHValue(); // reutilizamos para "dirección inválida"
+        if (_uniswapRouter == address(0) || _usdc == address(0)) {
+            revert ErrInvalidAddress();
         }
         if (_bankCapUSDC == 0) revert ErrZeroAmount();
 
-        usdc = IERC20(_usdc);
         uniswapRouter = IUniswapV2Router02(_uniswapRouter);
+        usdc = IERC20(_usdc);
         weth = IUniswapV2Router02(_uniswapRouter).WETH();
         bankCapUSDC = _bankCapUSDC;
 
-        // Opcional: habilitar USDC como token soportado "directo"
+        // Habilitar USDC como token soportado "directo"
         isSupportedToken[_usdc] = true;
     }
 
@@ -154,7 +157,7 @@ contract KipuBankV3 is Ownable, ReentrancyGuard {
     /// @dev
     /// - Si `tokenIn == address(0)`, se asume depósito en ETH vía `msg.value`.
     /// - Si `tokenIn == address(usdc)`, se acredita USDC directo sin swap.
-    /// - Si es otro ERC20, se swappea TOKEN -> USDC usando Uniswap V2.
+    /// - Si es otro ERC20, se swappea TOKEN -> USDC usando Uniswap V2 (token debe estar soportado).
     /// @param tokenIn Dirección del token que se deposita (address(0) para ETH).
     /// @param amount Cantidad del token a depositar (ignorada para ETH, se usa msg.value).
     function deposit(address tokenIn, uint256 amount)
@@ -233,7 +236,7 @@ contract KipuBankV3 is Ownable, ReentrancyGuard {
     /// @param token Dirección del token a actualizar.
     /// @param supported true para habilitar, false para deshabilitar.
     function setSupportedToken(address token, bool supported) external onlyOwner {
-        if (token == address(0)) revert ErrTokenNotSupported(token);
+        if (token == address(0)) revert ErrInvalidAddress();
         isSupportedToken[token] = supported;
         emit SupportedTokenUpdated(token, supported);
     }
@@ -257,6 +260,11 @@ contract KipuBankV3 is Ownable, ReentrancyGuard {
     /// @notice Devuelve el total de USDC contable del banco (suma de balances de usuarios).
     function getTotalUSDC() external view returns (uint256) {
         return totalUSDC;
+    }
+
+    /// @notice Devuelve la dirección del token USDC utilizado.
+    function getUSDCAddress() external view returns (address) {
+        return address(usdc);
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -308,7 +316,7 @@ contract KipuBankV3 is Ownable, ReentrancyGuard {
 
         uint256 beforeBal = usdc.balanceOf(address(this));
 
-        // amountOutMin = 0 en versión demo (para producción: calcular slippage seguro)
+        // amountOutMin = 0 en versión académica (para producción: calcular slippage seguro)
         uniswapRouter.swapExactETHForTokens{value: amountETH}(
             0,
             path,
@@ -343,7 +351,7 @@ contract KipuBankV3 is Ownable, ReentrancyGuard {
 
         uint256 beforeBal = usdc.balanceOf(address(this));
 
-        // amountOutMin = 0 en versión demo (para producción: calcular slippage seguro)
+        // amountOutMin = 0 en versión académica (para producción: calcular slippage seguro)
         uniswapRouter.swapExactTokensForTokens(
             amountIn,
             0,
@@ -368,4 +376,3 @@ contract KipuBankV3 is Ownable, ReentrancyGuard {
 
     fallback() external payable {}
 }
-
